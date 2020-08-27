@@ -178,6 +178,7 @@ class CommKernel:
         self._read_type = None
         self.host = host
         self.port = port
+        self.read_buffer = bytearray()
 
     def open(self):
         if hasattr(self, "socket"):
@@ -198,13 +199,17 @@ class CommKernel:
     #
 
     def _read(self, length):
-        r = bytes()
-        while len(r) < length:
-            rn = self.socket.recv(min(8192, length - len(r)))
-            if not rn:
-                raise ConnectionResetError("Connection closed")
-            r += rn
-        return r
+        while len(self.read_buffer) < length:
+            # the number is just the maximum amount
+            # when there is not much data, it would return earlier
+            diff = length - len(self.read_buffer)
+            flag = 0
+            if diff > 8192:
+                flag |= socket.MSG_WAITALL
+            self.read_buffer += self.socket.recv(8192, flag)
+        result = self.read_buffer[:length]
+        self.read_buffer = self.read_buffer[length:]
+        return result
 
     def _read_header(self):
         self.open()
@@ -520,10 +525,18 @@ class CommKernel:
             logger.debug("rpc service: %d %r %r = %r",
                          service_id, args, kwargs, result)
 
+            original = self._write
+            payload = bytearray()
+            def cache_write(data):
+                nonlocal payload
+                payload += data
+            self._write = cache_write
             self._write_header(Request.RPCReply)
             self._write_bytes(return_tags)
             self._send_rpc_value(bytearray(return_tags),
                                  result, result, service)
+            original(payload)
+            self._write = original
         except RPCReturnValueError as exn:
             raise
         except Exception as exn:
